@@ -1,122 +1,113 @@
 import queue
-import sys
 import speech_recognition as sr
 import keyboard
 import threading
+import time
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.wait import WebDriverWait
+from selenium.webdriver.common.keys import Keys
+from selenium.common.exceptions import WebDriverException, NoSuchElementException
 
 # Определение горячих клавиш
 START_RECORDING_KEY = 'R'
-STOP_RECORDING_KEY = 'Q'
-# Выход из программы голосом
-EXIT_VOICE_COMMAND = "выключи"  # Команда для выхода из программы
+STOP_RECORDING_KEY = 'Tab'
 
 # Глобальные переменные
 driver = None
-website_url = "https://felo.ai/ru/search"  # Укажите нужный URL
-INPUT_FIELD_SELECTOR = 'textarea' # Укажите селектор для поля ввода
-SEARCH_BUTTON_SELECTOR = 'button[type="submit"]'
-
-q = queue.Queue()  # Очередь для получения текста
+website_url = "https://felo.ai/ru/search"
+INPUT_FIELD_SELECTOR = 'textarea'
 recording = False
-driver_lock = threading.Lock()  # Блокировка для синхронизации доступа к драйверу браузера
-exit_flag = False  # Флаг для обозначения того, что программа должна завершиться
+driver_lock = threading.Lock()
+exit_flag = False
 
 def start_recording():
     global recording
     recording = True
-    print(f"Запись начата. Нажмите '{START_RECORDING_KEY}' для остановки или скажите '{EXIT_VOICE_COMMAND}' для выхода.")
-    threading.Thread(target=listen).start()  # Запускаем listen в отдельном потоке
+    print(f"Запись начата. Нажмите '{STOP_RECORDING_KEY}' для остановки.")
+    threading.Thread(target=listen).start()
 
 def stop_recording():
     global recording
     recording = False
-    print("Запись остановлена.")
+    print("Запись остановлена. Завершение записи через 1 секунду...")
+    time.sleep(1)  # Задержка на 1 секунду для завершения записи
 
 def listen():
-    global exit_flag  # Объявляем exit_flag как глобальную переменную
+    global exit_flag
     recognizer = sr.Recognizer()
     mic = sr.Microphone()
 
     with mic as source:
-        while recording and not exit_flag:
-            print("Скажите что-нибудь...")
-            audio = recognizer.listen(source)
+        recognizer.adjust_for_ambient_noise(source)
+        print("Скажите что-нибудь...")
 
+        while recording and not exit_flag:
             try:
+                audio = recognizer.listen(source, timeout=5)
                 text = recognizer.recognize_google(audio, language='ru-RU')
                 print(f"Вы сказали: {text}")
-                q.put(text)  # Добавляем текст в очередь
-
-                # Проверяем, не была ли произнесена команда для выхода
-                if EXIT_VOICE_COMMAND in text.lower():
-                    print("Выход из программы...")
-                    exit_flag = True  # Устанавливаем флаг для завершения программы
+                insert_text_into_field(text)
 
             except sr.UnknownValueError:
-                print("Не удалось распознать звук.")
+                print("Не удалось распознать звук. Пожалуйста, попробуйте снова.")
             except sr.RequestError as e:
                 print(f"Ошибка сервиса распознавания: {e}")
+            except sr.WaitTimeoutError:
+                # Игнорируем таймаут, если ничего не было сказано
+                pass
 
-def send_text_to_website():
+def insert_text_into_field(text):
     global driver
-    while True:
-        text = q.get()  # Получаем текст из очереди
-        if text is None:
-            break
 
-        with driver_lock:  # Блокируем доступ к драйверу браузера
-            if driver is None or not driver:
-                # Создаем новый экземпляр драйвера для Яндекс.Браузера
-                driver = webdriver.Chrome()  # Убедитесь, что драйвер установлен и доступен
+    with driver_lock:
+        if driver is None:
+            start_driver()
 
-            # Открываем указанный сайт
-            driver.get(website_url)
+        try:
+            input_field = WebDriverWait(driver, 5).until(  # Уменьшено время ожидания
+                EC.visibility_of_element_located((By.CSS_SELECTOR, INPUT_FIELD_SELECTOR))
+            )
+            input_field.clear()
+            input_field.send_keys(text)
+            input_field.send_keys(Keys.ENTER)
 
-            try:
-                # Явное ожидание для поиска поля ввода и кнопки отправки/поиска
-                input_field = WebDriverWait(driver, 10).until(
-                    EC.presence_of_element_located((By.CSS_SELECTOR, INPUT_FIELD_SELECTOR))
-                )
-                search_button = WebDriverWait(driver, 10).until(
-                    EC.presence_of_element_located((By.CSS_SELECTOR, SEARCH_BUTTON_SELECTOR))
-                )
-
-                # Убедимся, что поле ввода активно
-                input_field.click()  # Кликаем по полю ввода, чтобы установить фокус
-                input_field.clear()  # Очищаем поле ввода перед вставкой
-                input_field.send_keys(text)  # Вставляем текст
-
-                # Нажимаем кнопку отправки/поиска
-                search_button.click()
-
-                # После отправки запроса находим ссылку "Результаты поиска" и переходим по ней
-                link = driver.find_element(By.LINK_TEXT, 'Результаты поиска')
-                link.click()
-
-                # Продолжаем работу с веб-сайтом после перехода по ссылке
-
-            except Exception as e:
-                print(f"Ошибка при взаимодействии с полем ввода или кнопкой отправки/поиска: {e}")
-
-def close_driver():
-    global driver
-    with driver_lock:  # Блокируем доступ к драйверу браузера
-        if driver is not None:
+        except WebDriverException:
+            print("Браузер был закрыт. Перезапуск браузера...")
             driver.quit()
             driver = None
+            time.sleep(1)  # Задержка перед перезапуском
+            start_driver()
+            insert_text_into_field(text)  # Повторяем вставку текста после перезапуска
 
-# Назначаем клавиши для управления записью
+        except NoSuchElementException:
+            print("Поле ввода не найдено. Возможно, страница не загрузилась.")
+            driver.quit()
+            driver = None
+            time.sleep(1)  # Задержка перед перезапуском
+            start_driver()
+            insert_text_into_field(text)  # Повторяем вставку текста после перезапуска
+
+        except Exception as e:
+            print(f"Ошибка при взаимодействии с полем ввода: {e}")
+
+def start_driver():
+    global driver
+    driver = webdriver.Chrome()
+    driver.get(website_url)
+
 keyboard.add_hotkey(START_RECORDING_KEY, start_recording)
 keyboard.add_hotkey(STOP_RECORDING_KEY, stop_recording)
 
 print(f"Нажмите '{START_RECORDING_KEY}' для начала записи и '{STOP_RECORDING_KEY}' для остановки.")
-threading.Thread(target=send_text_to_website).start()  # Запускаем send_text_to_website в отдельном потоке
-keyboard.wait('esc')  # Ожидание нажатия клавиши Esc для завершения
 
-# Устанавливаем флаг для завершения программы
-exit_flag = True
-# Отправляем None в очередь, чтобы▕
+try:
+    keyboard.wait('esc')
+except KeyboardInterrupt:
+    print("Программа остановлена пользователем.")
+finally:
+    exit_flag = True
+    if driver is not None:
+        driver.quit()
+    print("Завершение программы.")
